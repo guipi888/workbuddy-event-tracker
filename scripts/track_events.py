@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-赛事活动追踪脚本 v2.0
+赛事活动追踪脚本 v2.2
 功能：
   1. 从配置的信息源抓取赛事信息
   2. 与历史记录比对，找出新增/变更赛事
   3. 新赛事自动提交到 OPC 公共赛事池（需要 API Key）
-  4. 输出摘要 + 更新本地记录
+  4. 查询 OPC 赛事池已有数据（GET /api/events/list）
+  5. 输出摘要 + 更新本地记录
 
 数据文件：
   - user_config.json  : API Key 配置
@@ -152,8 +153,42 @@ def extract_tags(text, max_tags=8):
 
 
 # ============================================================
-# OPC API 提交
+# OPC API 提交 & 查询
 # ============================================================
+
+def call_opc_api(user_config, method, path, payload=None):
+    """
+    调用 OPC API 通用函数
+    返回：(ok, body_json)
+    """
+    api_key = user_config.get("api_key")
+    if not api_key:
+        return False, {"code": "no_key", "error": "未配置 API Key"}
+    
+    api_base = user_config.get("api_base", "https://mrkjai.com")
+    url = f"{api_base}{path}"
+    
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "X-API-Key": api_key,
+    }
+    
+    data = None
+    if payload:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    
+    req = Request(url, data=data, headers=headers, method=method)
+    
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return True, json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        return False, {"code": f"http_{e.code}", "error": str(e.reason)}
+    except URLError as e:
+        return False, {"code": "network_error", "error": str(e)}
+    except Exception as e:
+        return False, {"code": "exception", "error": str(e)}
+
 
 def submit_to_opc(event, user_config):
     """
@@ -237,6 +272,155 @@ def submit_to_opc(event, user_config):
     except Exception as e:
         print(f"    ❌ 提交异常: {e}")
         return False, "exception", None
+
+
+def query_opc_events(user_config, **filters):
+    """
+    查询 OPC 赛事池已有数据
+    支持的过滤参数：
+      - type: startup / hackathon / design / academic / summit
+      - region: online / beijing / shanghai / hangzhou / shenzhen / national / overseas
+      - status: fresh / open / closing / ended
+      - keyword: 模糊搜索 title/summary/organizer
+      - contributor: 贡献者账号名（精确匹配）
+      - limit: 1-100 (默认 20)
+      - offset: 0+ (默认 0)
+      - sort: published_desc / deadline_asc / deadline_desc / created_desc
+    
+    返回：(ok, data)  其中 data = {items, total, limit, offset, hasMore}
+    """
+    api_key = user_config.get("api_key")
+    if not api_key:
+        print("⚠️  未配置 API Key，无法查询")
+        return False, {"code": "no_key", "error": "未配置 API Key"}
+
+    api_base = user_config.get("api_base", "https://mrkjai.com")
+    url = f"{api_base}/api/events/list"
+
+    # 构建 query string
+    params = {}
+    param_map = {
+        "type": "type",
+        "region": "region", 
+        "status": "status",
+        "keyword": "keyword",
+        "contributor": "contributor",
+        "limit": "limit",
+        "offset": "offset",
+        "sort": "sort",
+    }
+    
+    for k, v in filters.items():
+        if v is not None and k in param_map:
+            params[param_map[k]] = str(v)
+    
+    # 拼 URL
+    from urllib.parse import urlencode
+    if params:
+        url = f"{url}?{urlencode(params)}"
+
+    try:
+        req = Request(url, headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "X-API-Key": api_key,
+        })
+        with urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            ok = body.get("ok", False)
+            if ok:
+                return True, body.get("data", {})
+            else:
+                print(f"    ❌ 查询失败: code={body.get('code')}, error={body.get('error')}")
+                return False, body
+    except HTTPError as e:
+        print(f"    ❌ HTTP {e.code}: {e.reason}")
+        return False, {"code": f"http_{e.code}", "error": str(e.reason)}
+    except URLError as e:
+        print(f"    ❌ 网络错误: {e}")
+        return False, {"code": "network_error", "error": str(e)}
+    except Exception as e:
+        print(f"    ❌ 查询异常: {e}")
+        return False, {"code": "exception", "error": str(e)}
+
+
+def format_events_table(items):
+    """格式化赛事列表为表格"""
+    if not items:
+        return "暂无赛事数据"
+    
+    lines = []
+    lines.append(f"{'#' :<4} {'赛事名称':<40} {'类型':<10} {'地区':<8} {'报名截止':<12} {'贡献者':<10}")
+    lines.append("-" * 90)
+    
+    for i, item in enumerate(items, 1):
+        title = item.get("title", "")[:38]
+        etype = item.get("type", "")
+        region = item.get("region", "")
+        deadline = item.get("deadlineAt", "")[:10]
+        contributor = item.get("contributor") or "-"
+        
+        # 中文类型映射
+        type_map = {
+            "startup": "创业", "hackathon": "黑客松", "design": "设计",
+            "academic": "学术", "summit": "峰会"
+        }
+        region_map = {
+            "online": "线上", "beijing": "北京", "shanghai": "上海",
+            "hangzhou": "杭州", "shenzhen": "深圳", "national": "全国", "overseas": "海外"
+        }
+        
+        lines.append(f"{i:<4} {title:<40} {type_map.get(etype, etype):<10} {region_map.get(region, region):<8} {deadline:<12} {contributor:<10}")
+    
+    return "\n".join(lines)
+
+
+def cmd_query(user_config):
+    """交互式查询入口"""
+    print("\n" + "=" * 60)
+    print("🔍 OPC 赛事池查询")
+    print("=" * 60)
+    
+    if not user_config.get("api_key"):
+        print("\n❌ 未配置 API Key，请先设置后重试")
+        return
+    
+    # 默认查询：全部赛事，按发布时间倒序，20 条
+    print("\n📋 查询全部赛事（最新 20 条）...")
+    ok, data = query_opc_events(
+        user_config,
+        limit=20,
+        offset=0,
+        sort="published_desc",
+    )
+    
+    if ok:
+        items = data.get("items", [])
+        total = data.get("total", 0)
+        has_more = data.get("hasMore", False)
+        
+        print(f"\n📊 共 {total} 条赛事（当前显示 {len(items)} 条）")
+        print()
+        print(format_events_table(items))
+        
+        if has_more:
+            print(f"\n💡 还有更多数据，可以用 --offset {data.get('limit', 20)} 翻页")
+        
+        # 输出分类统计
+        type_counts = {}
+        for item in items:
+            t = item.get("type", "未知")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        if type_counts:
+            print(f"\n📈 类型分布：", ", ".join(f"{t}:{c}" for t, c in sorted(type_counts.items())))
+        
+        # 输出过滤提示
+        print(f"\n💡 过滤选项：--type hackathon --region shanghai --status open --keyword AI --contributor 桂皮")
+        print(f"💡 分页选项：--limit 10 --offset 20")
+        print(f"💡 排序选项：--sort deadline_asc")
+    else:
+        code = data.get("code", "unknown")
+        error = data.get("error", "")
+        print(f"\n❌ 查询失败 [{code}]: {error}")
 
 
 # ============================================================
@@ -417,15 +601,74 @@ def update_markdown_record(history):
 
 
 def main():
+    import sys
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv else "track"
+
     print("=" * 60)
-    print(f"赛事活动追踪脚本 v2.0")
+    if cmd == "query":
+        print(f"OPC 赛事池查询 v2.2")
+    else:
+        print(f"赛事活动追踪脚本 v2.2")
     print(f"执行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
     # 0. 加载用户配置
     user_config = load_json(USER_CONFIG_FILE)
     has_api_key = bool(user_config.get("api_key"))
-    print(f"\n🔑 API Key: {'已配置' if has_api_key else '未配置（将跳过 OPC 提交）'}")
+    upload_enabled = user_config.get("upload_enabled", True) if has_api_key else False
+
+    if cmd == "query":
+        if not has_api_key:
+            print(f"\n🔑 API Key: 未配置（无法查询 OPC 赛事池）")
+            print("💡 请先通过对话引导设置 API Key")
+            return
+        print(f"\n🔑 API Key: 已配置")
+        # 查询模式
+        filters = {}
+        i = 1
+        while i < len(argv):
+            arg = argv[i]
+            if arg.startswith("--") and i + 1 < len(argv):
+                key = arg[2:]
+                if key in ("type", "region", "status", "keyword", "contributor", "sort"):
+                    filters[key] = argv[i + 1]
+                    i += 2
+                    continue
+                elif key in ("limit", "offset"):
+                    try:
+                        filters[key] = int(argv[i + 1])
+                    except ValueError:
+                        filters[key] = argv[i + 1]
+                    i += 2
+                    continue
+            i += 1
+
+        print(f"\n🔍 查询条件：{filters if filters else '（显示全部）'}")
+        ok, data = query_opc_events(user_config, **filters)
+        if ok:
+            items = data.get("items", [])
+            total = data.get("total", 0)
+            has_more = data.get("hasMore", False)
+            print(f"\n📊 查询结果：{len(items)}/{total} 条")
+            if items:
+                print(format_events_table(items))
+                if has_more:
+                    current_limit = filters.get("limit", 20)
+                    print(f"\n💡 更多数据可用，使用 --offset {current_limit} 翻页")
+            else:
+                print("（无匹配赛事）")
+        else:
+            code = data.get("code", "unknown")
+            print(f"\n❌ 查询失败 [{code}]：{data.get('error', '')}")
+        return
+
+    # 默认：追踪模式
+    # 显示上传状态
+    if upload_enabled:
+        print(f"\n📤 上传状态：已开启 → 赛事将提交到 OPC 公共池（mrkjai.com）")
+    else:
+        print(f"\n📤 上传状态：已关闭 → 赛事仅保存在本地，不上传")
 
     # 1. 加载信息源
     sources_config = load_json(SOURCES_FILE)
@@ -481,9 +724,9 @@ def main():
         all_new.extend(new_events)
         all_changed.extend(changed_events)
 
-        # 提交新事件到 OPC
+        # 提交新事件到 OPC（需同时满足：upload_enabled=true + 有 Key）
         for event in new_events:
-            if has_api_key:
+            if upload_enabled and has_api_key:
                 ok, code, data = submit_to_opc(event, user_config)
                 opc_results.append({"event": event["name"], "ok": ok, "code": code, "data": data})
                 if ok and code == "created":
@@ -548,6 +791,7 @@ def main():
         "changed_events": all_changed,
         "opc_results": opc_results,
         "has_api_key": has_api_key,
+        "upload_enabled": upload_enabled,
     }
     summary_file = SCRIPT_DIR / "last_run_summary.json"
     save_json(summary_file, summary)

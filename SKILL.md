@@ -2,7 +2,7 @@
 name: OPC赛事活动追踪
 slug: opc-event-tracker
 displayName: OPC赛事活动追踪
-version: "2.1.0"
+version: "2.3.0"
 description: 追踪 OPC/AI/独立开发者相关赛事活动。从信息源抓取 → 提取结构化信息 → 提交到 OPC 公共赛事池。安装时引导用户获取 API Key。触发词：赛事、比赛、hackathon、活动、OPC赛事、AI比赛、独立开发者大赛、收录赛事、加到OPC
 agent_created: true
 triggers:
@@ -40,40 +40,64 @@ xiaping_tags:
 
 ## 首次安装引导（必须执行）
 
-安装本技能后，**必须先引导用户设置 API Key**，否则无法提交到 OPC 公共赛事池。
+安装本技能后，**必须首先告知用户数据行为，由用户自主选择**。
 
 ### 引导流程
 
-1. 输出以下引导文案：
+**第一步：数据透明度告知**
 
 ```
-🔑 OPC 赛事收录 — API Key 设置
+🔑 OPC赛事活动追踪 — 首次使用配置
 
-本技能可以将赛事提交到 OPC（一人公司工具站）的公共赛事池。
-你需要一个 API Key 才能提交。
+本技能涉及两类数据处理，请仔细阅读后选择：
 
-📋 获取方式：
+📤 数据上传（可选）
+  • 目标：将你发现的赛事信息提交到 OPC 公共赛事池（https://mrkjai.com）
+  • 上传内容：赛事名称、简介、类型、地区、主办方、时间、链接
+  • 上传方式：HTTPS 加密传输，使用你的个人 API Key 鉴权
+  • 去重机制：同一链接不会重复收录
+  • 可见范围：提交后赛事对所有 OPC 用户可见
+
+📁 本地存储（始终生效）
+  • 追踪记录保存在本机 scripts/data/ 目录下
+  • 不上传任何数据到外部服务器
+
+⚠️ 你可以随时关闭上传：说「关闭赛事上传」即可
+⚠️ 即使不上传，技能的本地追踪功能完全可用
+
+请选择：
+  1️⃣ 开启上传 — 我会引导你获取 API Key，赛事将提交到 OPC 公共池
+  2️⃣ 关闭上传 — 技能仅本地运行，不上传任何数据
+  3️⃣ 稍后配置 — 先跳过，后续说「配置赛事上传」再设置
+```
+
+**第二步：根据用户选择执行**
+
+| 用户选择 | 操作 |
+|---------|------|
+| **1️⃣ 开启上传** | 输出获取 Key 引导 → 用户提供 Key → 写入 `user_config.json`（`upload_enabled=true`） |
+| **2️⃣ 关闭上传** | 写入 `user_config.json`（`upload_enabled=false`），告知：「✅ 已关闭上传，所有数据仅保存在本地」 |
+| **3️⃣ 稍后配置** | 不做修改，告知：「好的，后续说『配置赛事上传』可随时开启」 |
+
+**第三步：获取 API Key 引导（仅选项1时执行）**
+
+```
+📋 API Key 获取方式：
   1. 打开 https://mrkjai.com
   2. 登录/注册账号
   3. 进入「我的 → 个人集成（API Key）」页面
   4. 复制你的 Key（格式：opc_user_xxx...）
   5. 回到这里，把 Key 发给我
 
-💡 没有 Key 的话，本技能只能本地追踪赛事，无法提交到公共池。
+💡 Key 仅保存在本地 scripts/user_config.json，不会上传到任何地方。
 ```
 
-2. 用户提供 Key 后，写入配置文件：`scripts/user_config.json`
-3. 确认设置成功，告知用户：「✅ API Key 已保存，现在可以收录赛事了」
+### 运行时检查
 
-### user_config.json 结构
-
-```json
-{
-  "api_key": "opc_user_xxx...",
-  "api_base": "https://mrkjai.com",
-  "configured_at": "2026-06-22T17:00:00+08:00"
-}
-```
+每次执行上传操作前，必须检查 `upload_enabled` 字段：
+- `upload_enabled: true` + 有 Key → 正常上传
+- `upload_enabled: false` → 跳过上传，仅本地操作
+- `upload_enabled: true` + 无 Key → 提示用户设置 Key
 
 ---
 
@@ -81,8 +105,27 @@ xiaping_tags:
 
 - 用户提供赛事链接 + 说"收录"/"加到OPC"/"推到OPC" → **提取+提交到 OPC**
 - 用户主动问"有什么赛事" → 展示本地追踪记录
-- 定时任务自动执行（每周一） → 抓取信息源 + 提交到 OPC
+- 用户主动问"有什么赛事"/"OPC有什么比赛"/"查一下赛事池" → **查询 OPC 赛事池**
+- 用户说"查一下AI比赛"/"看看黑客松" → **按条件查询**
+
+### 流程C：查询 OPC 赛事池
+
+1. 用户说「有什么赛事」/「OPC有什么比赛」/「查一下赛事池」
+2. 调用 `GET /api/events/list` 查询 OPC 赛事池
+3. 格式化返回结果展示给用户（表格形式）
+4. 支持按 type/region/status/keyword/contributor 过滤
+5. 支持分页（limit/offset）和排序（sort）
+
+**查询示例**：
+- "有什么赛事" → 查全部（默认20条，按发布时间倒序）
+- "有什么黑客松" → type=hackathon
+- "上海有什么AI比赛" → region=shanghai + keyword=AI
+- "报名截止的赛事" → status=open
+
+### 流程D：定时追踪
 - 用户说"新增信息源" → 追加到 sources.json
+- 用户说"关闭赛事上传"/"关闭上传" → **关闭上传**（设置 upload_enabled=false）
+- 用户说"开启赛事上传"/"配置赛事上传" → **开启上传**（引导设置 Key）
 
 ---
 
@@ -110,7 +153,7 @@ xiaping_tags:
 
 ## OPC API 接口规范
 
-### 接口信息
+### 提交接口：POST /api/events/ingest
 
 | 项目 | 值 |
 |------|-----|
@@ -156,6 +199,46 @@ xiaping_tags:
 | `key_revoked` | Key 已撤销 |
 | `validation_error` | 字段校验失败 |
 | `internal_error` | 服务器异常 |
+
+### 查询接口：GET /api/events/list
+
+| 项目 | 值 |
+|------|-----|
+| 方法 | GET |
+| 路径 | `/api/events/list` |
+| 鉴权 | Header `X-API-Key: {api_key}`（同 ingest，同一个 key） |
+
+**Query 参数（全部可选）**：
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `type` | enum | — | `startup` / `hackathon` / `design` / `academic` / `summit` |
+| `region` | enum | — | `online` / `beijing` / `shanghai` / `hangzhou` / `shenzhen` / `national` / `overseas` |
+| `status` | enum | — | `fresh`(7天内新发布) / `open`(报名中) / `closing`(3天内截止) / `ended`(已截止) |
+| `keyword` | string | — | 模糊搜索 title/summary/organizer |
+| `contributor` | string | — | 贡献者账号名（精确匹配） |
+| `limit` | int 1-100 | 20 | 每页条数 |
+| `offset` | int ≥0 | 0 | 跳过条数 |
+| `sort` | enum | `published_desc` | `published_desc` / `deadline_asc` / `deadline_desc` / `created_desc` |
+
+**响应格式**：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "items": [{ "id", "title", "summary", "type", "region", "organizer",
+                "publishedAt", "deadlineAt", "externalUrl", "tags",
+                "contributor", "createdAt", "updatedAt" }],
+    "total": 38,
+    "limit": 20,
+    "offset": 0,
+    "hasMore": true
+  }
+}
+```
+
+**错误码**：同 ingest（unauthenticated / invalid_key / key_revoked / validation_error / internal_error）
 
 ---
 
@@ -209,12 +292,20 @@ xiaping_tags:
 ## 执行命令
 
 ```bash
-# 手动运行追踪（Python 3.8+ 均可，建议用系统 python3）
-python3 "/<技能安装目录>/赛事活动追踪/scripts/track_events.py"
+# 追踪模式（默认）：抓取信息源 + 提交到 OPC
+python3 track_events.py
 
-# 或显式指定 python3 路径（如 managed runtime）
-# /Users/kyle/.workbuddy/binaries/python/versions/3.13.12/bin/python3 \
-#   "/Users/kyle/.workbuddy/skills/赛事活动追踪/scripts/track_events.py"
+# 查询模式：查 OPC 赛事池已有数据
+python3 track_events.py query
+
+# 查询 + 过滤：只看黑客松
+python3 track_events.py query --type hackathon
+
+# 查询 + 过滤 + 分页：上海地区，AI关键词，5条
+python3 track_events.py query --region shanghai --keyword AI --limit 5
+
+# 查询 + 排序：按报名截止时间升序
+python3 track_events.py query --sort deadline_asc
 ```
 
 ---
@@ -253,14 +344,39 @@ python3 "/<技能安装目录>/赛事活动追踪/scripts/track_events.py"
 
 | 文件 | 安装后路径 | 用途 |
 |------|---------|------|
-| user_config.json | `scripts/user_config.json` | 用户 API Key 配置（**勿提交到公开仓库**） |
+| user_config.json | `scripts/user_config.json` | 用户 API Key + 上传开关配置（**勿提交到公开仓库**） |
 | sources.json | `scripts/sources.json` | 信息源配置 |
 | events_history.json | `scripts/events_history.json` | 历史赛事记录（自动生成） |
 | 赛事记录.md | `scripts/data/赛事记录.md` | 人类可读记录（自动生成） |
 
 ---
 
-## references/ 目录说明
+## 数据透明度声明
+
+本技能遵循最小权限和透明原则：
+
+| 行为 | 是否上传 | 目标服务器 | 用户控制 |
+|------|---------|----------|---------|
+| 本地追踪（抓取赛事信息） | ❌ 仅本地 | — | 始终生效 |
+| 赛事提交到 OPC 赛事池 | ✅ 可选 | https://mrkjai.com | `upload_enabled` 字段控制 |
+| 查询 OPC 赛事池 | ✅ 发起 GET 请求 | https://mrkjai.com | 需要 API Key |
+
+**user_config.json 完整结构**：
+
+```json
+{
+  "api_key": "opc_user_xxx...",
+  "api_base": "https://mrkjai.com",
+  "upload_enabled": true,
+  "configured_at": "2026-06-22T17:00:00+08:00"
+}
+```
+
+- `upload_enabled: true` → 新发现的赛事自动提交到 OPC 公共池
+- `upload_enabled: false` → 所有功能仅在本地运行，不发送任何赛事数据
+- 可随时说「关闭赛事上传」或「开启赛事上传」切换
+
+---
 
 - [sources-mgmt.md](references/sources-mgmt.md) — 信息源添加规范
 - [api-spec.md](references/api-spec.md) — OPC API 完整对接文档（可复制给其他 AI）
@@ -303,3 +419,5 @@ scripts/data/
 | v1.1 | 2026-06-22 | 升级脚本化抓取 + JSON历史比对 | Kyle |
 | v2.0 | 2026-06-22 | 重大升级：集成 OPC API 提交 + 安装引导获取 Key + 用户链路 | Kyle |
 | v2.1 | 2026-06-22 | 开源适配：清空真实 Key、路径通用化、添加 .gitignore 建议 | Kyle |
+| v2.2 | 2026-06-22 | 新增赛事查询功能：GET /api/events/list + query 模式 + 表格格式化 | Kyle |
+| v2.3 | 2026-06-22 | 安全修复：清空泄露 Key + 新增 upload_enabled 开关 + 首次安装数据透明度告知 | Kyle |
