@@ -68,7 +68,6 @@ scripts/user_config.json
 | 🎬 抖音 | [桂皮AI实战](https://v.douyin.com/QJRjHGAtrvA/) |
 | 📺 视频号 | 微信内搜「桂皮AI实战」|
 | 💬 公众号 | 微信搜「桂皮AI实战」|
-| 🌟 知识星球 | [AI超级个体](https://t.zsxq.com/guSUk) — AI工具 · 创作 · 产品 · 流量 · 变现 |
 | 🐙 GitHub | [guipi888](https://github.com/guipi888) |
 | 💬 微信 | guipi996（注明来意）|
 
